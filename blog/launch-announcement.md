@@ -21,7 +21,7 @@ We wanted a real answer.
 Today I'm releasing **agent-gov** — an open-source, MIT-licensed cost governance platform purpose-built for AI agents. It's a lightweight reverse proxy that sits *between* your agents and their LLM providers, tracking every cent, enforcing daily budgets, and **auto-pausing agents that overspend.**
 
 ```
-pip install agent-gov
+pip install agent-gov-saas
 agent-gov start
 ```
 
@@ -55,7 +55,7 @@ The initial release punches well above its weight:
 
 ```bash
 # Install
-pip install agent-gov
+pip install agent-gov-saas
 
 # Start the proxy (defaults to port 8080)
 agent-gov start
@@ -102,7 +102,7 @@ But we're not building this in a vacuum. The whole point of open-source is that 
 ## Get Involved
 
 - **GitHub:** [github.com/agent-gov/agent-gov](https://github.com/agent-gov/agent-gov) — star, fork, open issues
-- **Install:** `pip install agent-gov`
+- **Install:** `pip install agent-gov-saas`
 - **Docs:** Read the README — it covers configuration, workspaces, budget policies, and API
 - **Contributions:** PRs welcome. We need better provider coverage, dashboard UIs, deployment guides
 - **Discussions:** We're tracking the 2025 agent-cost landscape — share your horror stories and wishlist features

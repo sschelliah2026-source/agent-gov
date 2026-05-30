@@ -1,47 +1,51 @@
 [build-system]
 requires = ["setuptools>=64", "wheel"]
-build-backend = "setuptools.backends._legacy:_Backend"
+build-backend = "setuptools.build_meta"
 
 [project]
-name = "agent-gov"
+name = "agent-gov-saas"
 version = "0.5.0"
-description = "AI Agent Cost Governance Platform — reverse proxy that tracks, budgets, and controls AI agent spending"
+description = "AI Agent Cost Governance — budget enforcement, per-tool cost tracking, multi-tenant workspaces"
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.9"
-license = {text = "MIT"}
-keywords = ["ai", "agents", "cost", "governance", "budget", "proxy"]
+
 authors = [
-    {name = "MAAGZ Dev", email = "maagz@maagz.com"}
+    {name = "MAAGZ Dev", email = "sschelliah2026@gmail.com"},
 ]
+
 classifiers = [
-    "Development Status :: 4 - Beta",
+    "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
-    "Programming Language :: Python :: 3.12",
     "Topic :: Software Development :: Libraries :: Application Frameworks",
-    "Topic :: System :: Monitoring",
 ]
+
 dependencies = [
     "fastapi>=0.100.0",
-    "uvicorn>=0.20.0",
-    "pydantic>=2.0.0",
+    "uvicorn[standard]>=0.20.0",
     "httpx>=0.24.0",
-    "aiosqlite>=0.19.0",
     "jinja2>=3.0.0",
+    "aiofiles>=23.0.0",
 ]
 
 [project.urls]
-"Homepage" = "https://github.com/maagz/agent-gov"
-"Bug Reports" = "https://github.com/maagz/agent-gov/issues"
-"Source" = "https://github.com/maagz/agent-gov"
+Homepage = "https://github.com/sschelliah2026-source/agent-gov"
+Repository = "https://github.com/sschelliah2026-source/agent-gov"
+Documentation = "https://github.com/sschelliah2026-source/agent-gov#readme"
 
 [project.scripts]
 agent-gov = "cli:main"
 
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.21.0",
+]
+
 [tool.setuptools.packages.find]
-where = ["."]
-include = ["app", "database", "cli"]
+include = ["agent_gov*"]

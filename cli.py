@@ -82,7 +82,7 @@ def _start_server(host: str, port: int, reload: bool):
     try:
         import uvicorn
     except ImportError:
-        print("❌ Missing dependencies. Run: pip install agent-gov")
+        print("❌ Missing dependencies. Run: pip install agent-gov-saas")
         sys.exit(1)
     
     # Ensure we can import the app
