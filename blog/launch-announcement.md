@@ -101,7 +101,7 @@ But we're not building this in a vacuum. The whole point of open-source is that 
 
 ## Get Involved
 
-- **GitHub:** [github.com/agent-gov/agent-gov](https://github.com/agent-gov/agent-gov) — star, fork, open issues
+- **GitHub:** [github.com/sschelliah2026-source/agent-gov](https://github.com/sschelliah2026-source/agent-gov) — star, fork, open issues
 - **Install:** `pip install agent-gov-saas`
 - **Docs:** Read the README — it covers configuration, workspaces, budget policies, and API
 - **Contributions:** PRs welcome. We need better provider coverage, dashboard UIs, deployment guides

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agent-gov-saas"
-version = "0.5.0"
+version = "0.5.1"
 description = "AI Agent Cost Governance — budget enforcement, per-tool cost tracking, multi-tenant workspaces"
 readme = "README.md"
 license = "MIT"
