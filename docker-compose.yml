@@ -1,0 +1,17 @@
+version: "3.8"
+
+services:
+  agent-gov:
+    build: .
+    container_name: agent-gov
+    ports:
+      - "8000:8000"
+    volumes:
+      - agent-gov-data:/app
+    restart: unless-stopped
+    environment:
+      - AGENT_GOV_DB_PATH=/data/agent-gov.db
+    command: uvicorn app:app --host 0.0.0.0 --port 8000
+
+volumes:
+  agent-gov-data:
