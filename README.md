@@ -75,6 +75,22 @@ else:
 
 Open `http://localhost:8000/dashboard` — live view of all agents, their spend, and budget status.
 
+### 5. (Optional) Pre-Register Common Tools
+
+```bash
+# Register 24 common AI tools with realistic costs (₹)
+python seed_tools.py
+
+# Or bash version:
+bash seed-tools.sh
+
+# Preview before registering:
+python seed_tools.py --list
+
+# Register only tools matching a keyword:
+python seed_tools.py --filter deepseek
+```
+
 ---
 
 ## API Reference
