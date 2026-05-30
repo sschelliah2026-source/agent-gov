@@ -330,7 +330,7 @@ async def test_root_shows_tools_count():
     async with await client() as c:
         await c.post("/tools/register", json={"name": "count-test", "cost_per_call": 1.0})
         r = await c.get("/")
-        assert r.json()["version"] == "0.5.0"
+        assert r.json()["version"] == "0.5.1"
         assert "tools_registered" in r.json()
 
 

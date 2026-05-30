@@ -59,7 +59,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="agent-gov",
     description="AI Agent Cost Governance Platform",
-    version="0.5.0",
+    version="0.5.1",
     lifespan=lifespan
 )
 
@@ -101,7 +101,7 @@ async def root():
     stats = await db.get_stats()
     return {
         "service": "agent-gov",
-        "version": "0.5.0",
+        "version": "0.5.1",
         "agents_registered": stats["agents_registered"],
         "total_calls_tracked": stats["total_calls_tracked"],
         "tools_registered": stats.get("tools_registered", 0),
