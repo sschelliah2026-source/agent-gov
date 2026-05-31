@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agent-gov-saas"
-version = "0.5.1"
-description = "AI Agent Cost Governance — budget enforcement, per-tool cost tracking, multi-tenant workspaces"
+version = "0.6.0"
+description = "AI Agent Cost Governance — policy engine, budget enforcement, per-tool cost tracking, multi-tenant workspaces"
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
@@ -47,5 +47,5 @@ dev = [
     "pytest-asyncio>=0.21.0",
 ]
 
-[tool.setuptools.packages.find]
-include = ["agent_gov*"]
+[tool.setuptools]
+py-modules = ["app", "database", "cli", "seed_tools"]
