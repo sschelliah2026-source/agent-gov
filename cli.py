@@ -17,10 +17,13 @@ DESCRIPTION = """
 
 A reverse proxy that sits between your AI agents and their tools.
 Tracks costs, enforces budgets, auto-pauses overspending agents.
+NOW WITH POLICY ENGINE: block tools, set cost thresholds, require approvals.
 
 Quick start:
   agent-gov start          # Start server on port 8000
   curl localhost:8000       # Health check
+  # Create a policy:
+  curl -X POST /policies -H 'Content-Type: application/json' -d '{"name":"No GPT-4","policy_type":"block_tool","policy_config":{"tool_name":"gpt-4"},"action":"block"}'
 """
 
 

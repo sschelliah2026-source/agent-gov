@@ -499,3 +499,275 @@ async def test_default_workspace_backward_compat():
         r = await c.post("/agents/register", json={"name": "LegacyBot", "daily_budget": 100})
         assert r.status_code == 200
         assert r.json()["workspace_id"] == "default"
+
+
+# ═══════════════════════════════════════════════
+# v0.6 — Policy Engine Tests
+# ═══════════════════════════════════════════════
+
+async def test_list_policy_types():
+    """Should list available policy types and actions."""
+    async with await client() as c:
+        r = await c.get("/policies/types")
+        assert r.status_code == 200
+        assert "policy_types" in r.json()
+        assert "block_tool" in r.json()["policy_types"]
+        assert "actions" in r.json()
+
+
+async def test_create_block_tool_policy():
+    """Create a policy that blocks a specific tool."""
+    async with await client() as c:
+        r = await c.post("/policies", json={
+            "name": "Block Expensive LLM",
+            "description": "Blocks GPT-4 calls",
+            "policy_type": "block_tool",
+            "policy_config": {"tool_name": "gpt-4"},
+            "action": "block"
+        })
+        assert r.status_code == 200
+        assert r.json()["id"] is not None
+        assert r.json()["name"] == "Block Expensive LLM"
+        assert r.json()["enabled"] == True
+
+
+async def test_create_tool_over_cost_policy():
+    """Create a policy that blocks tools over a cost threshold."""
+    async with await client() as c:
+        r = await c.post("/policies", json={
+            "name": "Cost Cap",
+            "policy_type": "block_tool_over_cost",
+            "policy_config": {"max_cost": 5.0},
+            "action": "block"
+        })
+        assert r.status_code == 200
+
+
+async def test_create_budget_warning_policy():
+    """Create a budget warning policy."""
+    async with await client() as c:
+        r = await c.post("/policies", json={
+            "name": "Budget Warning at 80%",
+            "policy_type": "budget_warning",
+            "policy_config": {"threshold_pct": 80},
+            "action": "warn"
+        })
+        assert r.status_code == 200
+
+
+async def test_create_require_approval_policy():
+    """Create a policy that requires approval for a tool."""
+    async with await client() as c:
+        r = await c.post("/policies", json={
+            "name": "Approve Deploy",
+            "policy_type": "require_approval",
+            "policy_config": {"tool_name": "deploy-api"},
+            "action": "require_approval"
+        })
+        assert r.status_code == 200
+
+
+async def test_list_policies():
+    """Should list all created policies."""
+    async with await client() as c:
+        # Create a policy first
+        await c.post("/policies", json={
+            "name": "ListTest Policy",
+            "policy_type": "block_tool",
+            "policy_config": {"tool_name": "test-tool"}
+        })
+        r = await c.get("/policies")
+        assert r.status_code == 200
+        assert r.json()["count"] > 0
+        names = [p["name"] for p in r.json()["policies"]]
+        assert "ListTest Policy" in names
+
+
+async def test_get_policy_by_id():
+    """Should get a single policy by ID."""
+    async with await client() as c:
+        created = await c.post("/policies", json={
+            "name": "GetTest Policy",
+            "policy_type": "block_tool",
+            "policy_config": {"tool_name": "get-test"}
+        })
+        policy_id = created.json()["id"]
+        
+        r = await c.get(f"/policies/{policy_id}")
+        assert r.status_code == 200
+        assert r.json()["name"] == "GetTest Policy"
+
+
+async def test_get_policy_not_found():
+    """Should return 404 for non-existent policy."""
+    async with await client() as c:
+        r = await c.get("/policies/99999")
+        assert r.status_code == 404
+
+
+async def test_delete_policy():
+    """Should delete a policy."""
+    async with await client() as c:
+        created = await c.post("/policies", json={
+            "name": "DeleteMe",
+            "policy_type": "block_tool",
+            "policy_config": {"tool_name": "delete-me"}
+        })
+        policy_id = created.json()["id"]
+        
+        r = await c.delete(f"/policies/{policy_id}")
+        assert r.status_code == 200
+        
+        r = await c.get(f"/policies/{policy_id}")
+        assert r.status_code == 404
+
+
+async def test_toggle_policy():
+    """Should enable/disable a policy."""
+    async with await client() as c:
+        created = await c.post("/policies", json={
+            "name": "ToggleTest",
+            "policy_type": "block_tool",
+            "policy_config": {"tool_name": "toggle-me"}
+        })
+        policy_id = created.json()["id"]
+        
+        # Disable
+        r = await c.patch(f"/policies/{policy_id}/toggle", json={"enabled": False})
+        assert r.json()["enabled"] == False
+        
+        # Re-enable
+        r = await c.patch(f"/policies/{policy_id}/toggle", json={"enabled": True})
+        assert r.json()["enabled"] == True
+
+
+async def test_proxy_blocks_violating_policy():
+    """Proxy should reject calls blocked by policy."""
+    async with await client() as c:
+        # Create a policy that blocks gpt-4
+        await c.post("/policies", json={
+            "name": "Block GPT-4",
+            "policy_type": "block_tool",
+            "policy_config": {"tool_name": "gpt-4"},
+            "action": "block"
+        })
+        
+        # Register agent
+        key = (await c.post("/agents/register", json={"name": "PolicyBot", "daily_budget": 500})).json()["api_key"]
+        
+        # Call allowed tool — should pass
+        r = await c.post("/proxy/call", json={"agent_key": key, "tool_name": "claude", "estimated_cost": 10})
+        assert r.status_code == 200
+        
+        # Call blocked tool — should be 403
+        r = await c.post("/proxy/call", json={"agent_key": key, "tool_name": "gpt-4", "estimated_cost": 5})
+        assert r.status_code == 403
+        assert "violation" in str(r.json()).lower()
+
+
+async def test_proxy_blocks_tool_over_cost():
+    """Proxy should block expensive tools beyond cost threshold."""
+    async with await client() as c:
+        # Create cost threshold policy
+        await c.post("/policies", json={
+            "name": "Max $5 per call",
+            "policy_type": "block_tool_over_cost",
+            "policy_config": {"max_cost": 5.0},
+            "action": "block"
+        })
+        
+        # Register tool with known cost
+        await c.post("/tools/register", json={"name": "premium-api", "cost_per_call": 10.0})
+        await c.post("/tools/register", json={"name": "cheap-api", "cost_per_call": 1.0})
+        
+        key = (await c.post("/agents/register", json={"name": "CostCheckBot", "daily_budget": 500})).json()["api_key"]
+        
+        # Cheap tool should pass
+        r = await c.post("/proxy/call", json={"agent_key": key, "tool_name": "cheap-api", "estimated_cost": 0})
+        assert r.status_code == 200
+        
+        # Expensive tool should be blocked
+        r = await c.post("/proxy/call", json={"agent_key": key, "tool_name": "premium-api", "estimated_cost": 0})
+        assert r.status_code == 403
+
+
+async def test_proxy_returns_policy_warnings():
+    """Proxy should include policy warnings in response."""
+    async with await client() as c:
+        await c.post("/policies", json={
+            "name": "Warn at 10%",
+            "policy_type": "budget_warning",
+            "policy_config": {"threshold_pct": 10},
+            "action": "warn"
+        })
+        
+        # Agent with budget — first call will cross 10% if small budget
+        key = (await c.post("/agents/register", json={"name": "WarnBot", "daily_budget": 100})).json()["api_key"]
+        
+        # Call something costing 20 — that's 20% of 100, should trigger warning
+        r = await c.post("/proxy/call", json={"agent_key": key, "tool_name": "any", "estimated_cost": 20})
+        assert r.status_code == 200
+        assert "policy_warnings" in r.json()
+
+
+async def test_proxy_approval_flow():
+    """Proxy should return approval_id when policy requires approval."""
+    async with await client() as c:
+        await c.post("/policies", json={
+            "name": "Approve deploy",
+            "policy_type": "require_approval",
+            "policy_config": {"tool_name": "deploy-api"},
+            "action": "require_approval"
+        })
+        
+        key = (await c.post("/agents/register", json={"name": "ApprovalBot", "daily_budget": 500})).json()["api_key"]
+        
+        # Call non-approved tool — should pass without approval
+        r = await c.post("/proxy/call", json={"agent_key": key, "tool_name": "read-api", "estimated_cost": 10})
+        assert r.status_code == 200
+        assert "approval_id" not in r.json()
+        
+        # Call approved tool — should get approval_id
+        r = await c.post("/proxy/call", json={"agent_key": key, "tool_name": "deploy-api", "estimated_cost": 10})
+        assert r.status_code == 200
+        assert r.json()["approval_id"] is not None
+        assert r.json()["approval_status"] == "pending"
+
+
+async def test_approve_decide():
+    """Should approve a pending approval request."""
+    async with await client() as c:
+        await c.post("/policies", json={
+            "name": "Approve test",
+            "policy_type": "require_approval",
+            "policy_config": {"tool_name": "sensitive-api"},
+            "action": "require_approval"
+        })
+        
+        key = (await c.post("/agents/register", json={"name": "DecideBot", "daily_budget": 500})).json()["api_key"]
+        r = await c.post("/proxy/call", json={"agent_key": key, "tool_name": "sensitive-api", "estimated_cost": 10})
+        approval_id = r.json()["approval_id"]
+        
+        # Approve it
+        r = await c.post(f"/approvals/{approval_id}/decide", json={"approval_id": approval_id, "decision": "approve"})
+        assert r.status_code == 200
+        assert r.json()["status"] == "approved"
+
+
+async def test_approve_deny():
+    """Should deny a pending approval request."""
+    async with await client() as c:
+        await c.post("/policies", json={
+            "name": "Deny test",
+            "policy_type": "require_approval",
+            "policy_config": {"tool_name": "danger-api"},
+            "action": "require_approval"
+        })
+        
+        key = (await c.post("/agents/register", json={"name": "DenyBot", "daily_budget": 500})).json()["api_key"]
+        r = await c.post("/proxy/call", json={"agent_key": key, "tool_name": "danger-api", "estimated_cost": 10})
+        approval_id = r.json()["approval_id"]
+        
+        r = await c.post(f"/approvals/{approval_id}/decide", json={"approval_id": approval_id, "decision": "deny"})
+        assert r.status_code == 200
+        assert r.json()["status"] == "denied"

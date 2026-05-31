@@ -1,7 +1,8 @@
 """
 agent-gov v0.5: AI Agent Cost Governance Platform
 ==================================================
-NEW IN v0.5: Multi-tenancy — workspaces isolate teams, agents, tools, and costs.
+NEW IN v0.6: Policy Engine — cost-aware governance policies (block tools, budget warnings, approvals).
+- v0.5: Multi-tenancy — workspaces isolate teams, agents, tools, and costs.
 - v0.4: Daily budget auto-reset — budgets reset at midnight automatically.
 - v0.3: Per-tool cost tracking — real costs from tool registry, not client estimates.
 - v0.2: SQLite persistence — data survives restarts.
@@ -58,8 +59,8 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="agent-gov",
-    description="AI Agent Cost Governance Platform",
-    version="0.5.1",
+    description="AI Agent Cost Governance Platform — with Policy Engine",
+    version="0.6.0",
     lifespan=lifespan
 )
 
@@ -89,6 +90,32 @@ class ToolCall(BaseModel):
     agent_key: str = Field(...)
     tool_name: str = Field(...)
     estimated_cost: float = Field(0.0, ge=0)
+
+
+# ── v0.6: Policy Models ──
+
+class PolicyCreate(BaseModel):
+    name: str = Field(..., min_length=1, max_length=100)
+    description: str = Field("", max_length=500)
+    policy_type: str = Field(...)
+    policy_config: dict = Field(default_factory=dict)
+    action: str = Field("block")
+    workspace_id: str = Field("default", max_length=50)
+
+
+class PolicyToggle(BaseModel):
+    enabled: bool = Field(...)
+
+
+# ── Approval Models ──
+
+class ApprovalRequest(BaseModel):
+    approval_id: str = Field(...)
+    decision: str = Field(..., pattern="^(approve|deny)$")
+
+
+# In-memory approval store (simple, non-persistent for MVP)
+_pending_approvals: dict = {}
 
 
 # ──────────────────────────────────────────────
@@ -158,7 +185,47 @@ async def proxy_tool_call(call: ToolCall):
     registered_tool = await db.get_tool(call.tool_name)
     actual_cost = registered_tool["cost_per_call"] if registered_tool else call.estimated_cost
     
-    # Step 4: Budget check (using actual cost)
+    # Step 4b: Policy check (v0.6 feature)
+    # Check all enabled policies before allowing the call.
+    # Cost-aware policies can block tools that would be too expensive.
+    workspace = agent.get("workspace_id", "default")
+    policy_results = await db.check_policies(
+        workspace_id=workspace,
+        tool_name=call.tool_name,
+        cost=actual_cost,
+        spent_today=agent["spent_today"],
+        daily_budget=agent["daily_budget"]
+    )
+    
+    # Check for blocking policies
+    blocking = [p for p in policy_results if p["action"] == "block"]
+    if blocking:
+        violations = [{"policy_id": p["policy_id"], "name": p["name"], "reason": p["reason"]} for p in blocking]
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "error": "Policy violation",
+                "violations": violations,
+                "message": f"Blocked by {len(violations)} policy violation(s)"
+            }
+        )
+    
+    # Check for approval-required policies
+    pending_approval = [p for p in policy_results if p["action"] == "require_approval"]
+    approval_id = None
+    if pending_approval:
+        import uuid
+        approval_id = "ap-" + uuid.uuid4().hex[:12]
+        _pending_approvals[approval_id] = {
+            "agent_key": call.agent_key,
+            "tool_name": call.tool_name,
+            "cost": actual_cost,
+            "policies": [p["policy_id"] for p in pending_approval],
+            "status": "pending",
+            "created_at": datetime.now().isoformat()
+        }
+    
+    # Step 4 (was 5): Budget check (using actual cost)
     new_total = agent["spent_today"] + actual_cost
     if new_total > agent["daily_budget"]:
         await db.pause_agent(key_hash)
@@ -177,7 +244,10 @@ async def proxy_tool_call(call: ToolCall):
     updated = await db.update_agent_spend(key_hash, actual_cost)
     await db.log_cost_event(key_hash, agent["name"], call.tool_name, actual_cost)
     
-    return {
+    # Collect warnings from non-blocking policies
+    warnings = [p["reason"] for p in policy_results if p["action"] == "warn"]
+    
+    response_data = {
         "status": "approved",
         "agent": agent["name"],
         "tool": call.tool_name,
@@ -188,6 +258,16 @@ async def proxy_tool_call(call: ToolCall):
         "remaining": updated["daily_budget"] - updated["spent_today"],
         "calls_today": updated["calls_today"]
     }
+    
+    if approval_id:
+        response_data["approval_id"] = approval_id
+        response_data["approval_status"] = "pending"
+        response_data["message"] = f"Tool call approved but requires confirmation. POST /approvals/{approval_id}/decide to confirm."
+    
+    if warnings:
+        response_data["policy_warnings"] = warnings
+    
+    return response_data
 
 
 @app.post("/agents/{api_key}/resume")
@@ -317,6 +397,112 @@ async def list_workspaces():
     return {"workspaces": workspaces, "count": len(workspaces)}
 
 
+# ═══════════════════════════════════════════════
+# v0.6 — Policy Engine Endpoints
+# ═══════════════════════════════════════════════
+
+@app.get("/policies/types")
+async def list_policy_types():
+    """List all available policy types and their descriptions."""
+    return {"policy_types": db.POLICY_TYPES, "actions": db.POLICY_ACTIONS}
+
+
+@app.post("/policies")
+async def create_policy(policy: PolicyCreate):
+    """Create a new governance policy.
+    
+    Policy types:
+    - block_tool: Deny a specific tool entirely. config: {"tool_name": "gpt-4"}
+    - block_tool_over_cost: Deny if cost > threshold. config: {"max_cost": 5.0}
+    - budget_warning: Warn at X% budget. config: {"threshold_pct": 80}
+    - require_approval: Intercept for manual OK. config: {"tool_name": "deploy-api"}
+    
+    Actions: block, warn, require_approval
+    """
+    try:
+        result = await db.create_policy(
+            name=policy.name,
+            policy_type=policy.policy_type,
+            policy_config=policy.policy_config,
+            action=policy.action,
+            workspace_id=policy.workspace_id,
+            description=policy.description
+        )
+        return result
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/policies")
+async def list_policies(workspace_id: str = None):
+    """List all policies, optionally filtered by workspace."""
+    policies = await db.list_policies(workspace_id)
+    return {"policies": policies, "count": len(policies)}
+
+
+@app.get("/policies/{policy_id}")
+async def get_policy(policy_id: int):
+    """Get a single policy by ID."""
+    policy = await db.get_policy(policy_id)
+    if policy is None:
+        raise HTTPException(status_code=404, detail="Policy not found")
+    return policy
+
+
+@app.delete("/policies/{policy_id}")
+async def delete_policy(policy_id: int):
+    """Delete a policy by ID."""
+    deleted = await db.delete_policy(policy_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Policy not found")
+    return {"status": "deleted", "policy_id": policy_id}
+
+
+@app.patch("/policies/{policy_id}/toggle")
+async def toggle_policy(policy_id: int, toggle: PolicyToggle):
+    """Enable or disable a policy."""
+    policy = await db.toggle_policy(policy_id, toggle.enabled)
+    if policy is None:
+        raise HTTPException(status_code=404, detail="Policy not found")
+    return policy
+
+
+@app.post("/approvals/{approval_id}/decide")
+async def decide_approval(approval_id: str, decision: ApprovalRequest):
+    pending = _pending_approvals.get(approval_id)
+    if pending is None:
+        raise HTTPException(status_code=404, detail="Approval request not found")
+    if pending["status"] != "pending":
+        raise HTTPException(status_code=400, detail=f"Approval already {pending['status']}")
+    
+    if decision.decision == "approve":
+        pending["status"] = "approved"
+        return {
+            "status": "approved",
+            "tool_name": pending["tool_name"],
+            "cost": pending["cost"],
+            "message": "Tool call approved. The agent can proceed."
+        }
+    else:
+        pending["status"] = "denied"
+        return {
+            "status": "denied",
+            "tool_name": pending["tool_name"],
+            "message": "Tool call denied by approver."
+        }
+
+
+@app.get("/approvals/pending")
+async def list_pending_approvals():
+    """List all pending approval requests."""
+    pending = [
+        {"approval_id": k, **v}
+        for k, v in _pending_approvals.items()
+        if v["status"] == "pending"
+    ]
+    return {"pending": pending, "count": len(pending)}
+
+
 @app.get("/dashboard", response_class=HTMLResponse)
 async def dashboard(workspace_id: str = None):
     """Live dashboard showing agents + per-tool spend, filtered by workspace."""
@@ -368,6 +554,32 @@ async def dashboard(workspace_id: str = None):
     else:
         tool_rows = '<div class="empty">No tool data yet. Register tools and make calls to see breakdown.</div>'
     
+    # Build policies HTML (v0.6)
+    policies = await db.list_policies(workspace_id)
+    if policies:
+        policy_rows = ""
+        for p in policies:
+            action_badge = ""
+            if p["action"] == "block":
+                action_badge = '<span class="badge badge-block">block</span>'
+            elif p["action"] == "warn":
+                action_badge = '<span class="badge badge-warn">warn</span>'
+            elif p["action"] == "require_approval":
+                action_badge = '<span class="badge badge-approval">approval</span>'
+            enabled_badge = '<span class="badge badge-enabled">enabled</span>' if p["enabled"] else '<span class="badge badge-disabled">disabled</span>'
+            viol = f' · {p["violation_count"]} violations' if p["violation_count"] > 0 else ''
+            policy_rows += f'''
+            <div class="policy-row">
+                <div>
+                    <div class="policy-name">{p["name"]}</div>
+                    <div class="policy-detail">{p["policy_type"]} · {p.get("description", "")}{viol}</div>
+                </div>
+                <div>{action_badge} {enabled_badge}</div>
+            </div>'''
+        _policies_html = policy_rows
+    else:
+        _policies_html = '<div class="empty">No policies yet. POST /policies to create one.<br><br>Example: <code>curl -X POST /policies -d \'{"name":"Block GPT-4","policy_type":"block_tool","policy_config":{"tool_name":"gpt-4"},"action":"block"}\'</code></div>'
+    
     html = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -397,7 +609,7 @@ async def dashboard(workspace_id: str = None):
         .status-warning{{background:#78350f;color:#fcd34d}}
         .progress-bar{{height:8px;background:#334155;border-radius:4px;margin-bottom:8px;overflow:hidden}}
         .progress-fill{{height:100%;border-radius:4px;transition:width 0.3s}}
-        .agent-details{{display:flex;gap:24px;font-size:0.85rem;color:#94a3b8}}
+        .agent-details{{display:flex;gap:24px;font-size:0.85rem;color:#94a3b8;flex-wrap:wrap}}
         .agent-details span strong{{color:#e2e8f0}}
         .tool-section{{background:#1e293b;border-radius:8px;padding:20px}}
         .tool-row{{margin-bottom:12px}}
@@ -406,10 +618,22 @@ async def dashboard(workspace_id: str = None):
         .tool-metrics{{font-size:0.8rem;color:#94a3b8}}
         .tool-bar{{height:6px;background:#334155;border-radius:3px;overflow:hidden}}
         .tool-fill{{height:100%;background:#818cf8;border-radius:3px;transition:width 0.3s}}
+        .policy-section{{background:#1e293b;border-radius:8px;padding:20px;margin-bottom:12px}}
+        .policy-row{{display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid #334155}}
+        .policy-row:last-child{{border-bottom:none}}
+        .policy-name{{font-weight:600;font-size:0.9rem}}
+        .policy-detail{{font-size:0.8rem;color:#94a3b8}}
+        .badge{{font-size:0.7rem;padding:2px 8px;border-radius:10px;font-weight:600}}
+        .badge-block{{background:#7f1d1d;color:#fca5a5}}
+        .badge-warn{{background:#78350f;color:#fcd34d}}
+        .badge-approval{{background:#1e1b4b;color:#a5b4fc}}
+        .badge-enabled{{background:#065f46;color:#6ee7b7}}
+        .badge-disabled{{background:#334155;color:#94a3b8}}
         .empty{{text-align:center;color:#64748b;padding:40px 20px;font-size:0.9rem}}
         .refresh{{color:#94a3b8;font-size:0.8rem;text-align:right;margin-top:24px}}
         .persist{{background:#065f46;color:#6ee7b7;font-size:0.7rem;padding:2px 8px;border-radius:4px;margin-left:8px}}
         .v3-badge{{background:#4f46e5;color:#c7d2fe;font-size:0.7rem;padding:2px 8px;border-radius:4px;margin-left:4px}}
+        .v6-badge{{background:#dc2626;color:#fca5a5;font-size:0.7rem;padding:2px 8px;border-radius:4px;margin-left:4px}}
         a{{color:#94a3b8}}
         .total-spend{{font-size:0.95rem;color:#c7d2fe;margin-bottom:12px}}
     </style>
@@ -417,7 +641,7 @@ async def dashboard(workspace_id: str = None):
 </head>
 <body>
     <div class="container">
-        <h1>🛡 agent-gov <span class="version">v0.5</span><span class="persist">💾 SQLite</span><span class="v3-badge">🏢 Multi-Tenant</span></h1>
+        <h1>🛡 agent-gov <span class="version">v0.6</span><span class="persist">💾 SQLite</span><span class="v3-badge">🏢 Multi-Tenant</span><span class="v6-badge">⚖️ Policy Engine</span></h1>
         <p class="subtitle">
             AI Agent Cost Governance — {'workspace: ' + workspace_id if workspace_id else 'all workspaces'}
         </p>
@@ -458,7 +682,12 @@ async def dashboard(workspace_id: str = None):
         </div>
         </div>
         
-        <p class="refresh">Auto-refreshes 10s | <a href="/docs">API Docs →</a> | <a href="/tools">📋 Tools →</a> | <a href="/workspaces">🏢 Workspaces →</a></p>
+        <div class="section">
+        <h2>⚖️ Policies</h2>
+        {_policies_html}
+        </div>
+        
+        <p class="refresh">Auto-refreshes 10s | <a href="/docs">API Docs →</a> | <a href="/tools">📋 Tools →</a> | <a href="/workspaces">🏢 Workspaces →</a> | <a href="/policies">⚖️ Policies →</a> | <a href="/policies/types">📖 Policy Types →</a></p>
     </div>
 </body>
 </html>"""
@@ -470,5 +699,5 @@ async def dashboard(workspace_id: str = None):
 # ──────────────────────────────────────────────
 if __name__ == "__main__":
     import uvicorn
-    print("🚀 Starting agent-gov v0.5 (Multi-Tenant + Auto-Reset + Tool Registry)")
+    print("🚀 Starting agent-gov v0.6 (Policy Engine + Multi-Tenant + Auto-Reset + Tool Registry)")
     uvicorn.run("app:app", host="0.0.0.0", port=8000, reload=True)

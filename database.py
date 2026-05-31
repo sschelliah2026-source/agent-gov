@@ -70,6 +70,7 @@ async def get_db():
         await _db.execute("PRAGMA journal_mode=WAL")  # Better concurrent reads
         await _db.execute("PRAGMA foreign_keys=ON")    # Enforce FK constraints
         await _init_schema(_db)
+        await _init_policies_table(_db)  # v0.6: Policy engine
     return _db
 
 
@@ -535,3 +536,249 @@ async def close_db():
     if _db:
         await _db.close()
         _db = None
+
+
+# ═══════════════════════════════════════════════
+# v0.6 — Policy Engine
+#
+# Policies govern WHAT agents can do, not just what
+# they can afford. Each policy is a rule:
+#   - "block tool X entirely"
+#   - "block tool X if cost > $Y"
+#   - "require approval for category Z"
+#   - "warn at 80% budget"
+#
+# The breakthrough: cost-aware policies.
+# No competitor combines policy + cost governance.
+# ═══════════════════════════════════════════════
+
+POLICY_TYPES = {
+    "block_tool": "Deny a specific tool entirely",
+    "block_tool_over_cost": "Deny a tool if its per-call cost exceeds a threshold",
+    "block_category": "Deny all tools in a category",
+    "budget_warning": "Warn when agent reaches X% of daily budget",
+    "require_approval": "Intercept and require manual approval for a tool",
+}
+
+POLICY_ACTIONS = {
+    "block": "Reject the call with policy violation",
+    "warn": "Allow but log a warning",
+    "require_approval": "Return approval_id, caller must confirm",
+}
+
+async def _init_policies_table(db):
+    """Create policies table if not exists."""
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS policies (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            workspace_id TEXT NOT NULL DEFAULT 'default',
+            name TEXT NOT NULL,
+            description TEXT NOT NULL DEFAULT '',
+            policy_type TEXT NOT NULL,
+            policy_config TEXT NOT NULL DEFAULT '{}',
+            action TEXT NOT NULL DEFAULT 'block',
+            enabled INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            violation_count INTEGER NOT NULL DEFAULT 0,
+            FOREIGN KEY (workspace_id) REFERENCES workspaces(id)
+        )
+    """)
+    await db.execute("""
+        CREATE INDEX IF NOT EXISTS idx_policies_workspace
+        ON policies(workspace_id, enabled)
+    """)
+    await db.commit()
+
+
+# Hook into existing _init_schema by patching the call
+# We'll call _init_policies_table from get_db instead.
+# For now, it's also called at module init time via the startup_lifespan in app.py.
+
+async def create_policy(name: str, policy_type: str, policy_config: dict,
+                        action: str = "block", workspace_id: str = "default",
+                        description: str = "") -> dict:
+    """Create a new policy."""
+    db = await get_db()
+    now = datetime.now().isoformat()
+
+    if policy_type not in POLICY_TYPES:
+        raise ValueError(f"Invalid policy type: {policy_type}. Valid: {list(POLICY_TYPES.keys())}")
+    if action not in POLICY_ACTIONS:
+        raise ValueError(f"Invalid action: {action}. Valid: {list(POLICY_ACTIONS.keys())}")
+
+    import json
+    config_str = json.dumps(policy_config)
+
+    cursor = await db.execute("""
+        INSERT INTO policies (workspace_id, name, description, policy_type, policy_config, action, enabled, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)
+    """, (workspace_id, name, description, policy_type, config_str, action, now, now))
+    await db.commit()
+
+    policy_id = cursor.lastrowid
+    return {
+        "id": policy_id,
+        "name": name,
+        "policy_type": policy_type,
+        "action": action,
+        "workspace_id": workspace_id,
+        "enabled": True,
+        "message": f"Policy '{name}' created (id={policy_id})"
+    }
+
+
+async def list_policies(workspace_id: str = None) -> list[dict]:
+    """List all policies, optionally filtered by workspace."""
+    db = await get_db()
+    import json
+
+    if workspace_id:
+        cursor = await db.execute(
+            "SELECT * FROM policies WHERE workspace_id = ? ORDER BY created_at DESC",
+            (workspace_id,)
+        )
+    else:
+        cursor = await db.execute("SELECT * FROM policies ORDER BY created_at DESC")
+
+    rows = await cursor.fetchall()
+    return [{
+        "id": row["id"],
+        "workspace_id": row["workspace_id"],
+        "name": row["name"],
+        "description": row["description"],
+        "policy_type": row["policy_type"],
+        "policy_config": json.loads(row["policy_config"]) if row["policy_config"] else {},
+        "action": row["action"],
+        "enabled": bool(row["enabled"]),
+        "violation_count": row["violation_count"],
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    } for row in rows]
+
+
+async def get_policy(policy_id: int) -> Optional[dict]:
+    """Get a single policy by ID."""
+    db = await get_db()
+    import json
+    cursor = await db.execute("SELECT * FROM policies WHERE id = ?", (policy_id,))
+    row = await cursor.fetchone()
+    if row is None:
+        return None
+    return {
+        "id": row["id"],
+        "workspace_id": row["workspace_id"],
+        "name": row["name"],
+        "description": row["description"],
+        "policy_type": row["policy_type"],
+        "policy_config": json.loads(row["policy_config"]) if row["policy_config"] else {},
+        "action": row["action"],
+        "enabled": bool(row["enabled"]),
+        "violation_count": row["violation_count"],
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
+
+
+async def delete_policy(policy_id: int) -> bool:
+    """Delete a policy by ID. Returns True if deleted."""
+    db = await get_db()
+    cursor = await db.execute("DELETE FROM policies WHERE id = ?", (policy_id,))
+    await db.commit()
+    return cursor.rowcount > 0
+
+
+async def toggle_policy(policy_id: int, enabled: bool) -> Optional[dict]:
+    """Enable or disable a policy."""
+    db = await get_db()
+    now = datetime.now().isoformat()
+    val = 1 if enabled else 0
+    await db.execute(
+        "UPDATE policies SET enabled = ?, updated_at = ? WHERE id = ?",
+        (val, now, policy_id)
+    )
+    await db.commit()
+    return await get_policy(policy_id)
+
+
+async def check_policies(workspace_id: str, tool_name: str, cost: float, spent_today: float, daily_budget: float) -> list[dict]:
+    """Check all enabled policies for a workspace against a tool call.
+    
+    Returns a list of policy results:
+    [
+        {"policy_id": 1, "name": "...", "action": "block", "reason": "..."},
+        {"policy_id": 2, "name": "...", "action": "warn", "reason": "..."},
+    ]
+    
+    The caller should reject if ANY result has action == "block".
+    """
+    db = await get_db()
+    import json
+
+    cursor = await db.execute(
+        "SELECT * FROM policies WHERE workspace_id = ? AND enabled = 1 ORDER BY created_at ASC",
+        (workspace_id,)
+    )
+    rows = await cursor.fetchall()
+
+    results = []
+    for row in rows:
+        config = json.loads(row["policy_config"]) if row["policy_config"] else {}
+        policy_id = row["id"]
+        policy_type = row["policy_type"]
+        action = row["action"]
+
+        violated = False
+        reason = ""
+
+        if policy_type == "block_tool":
+            target_tool = config.get("tool_name", "")
+            if tool_name == target_tool:
+                violated = True
+                reason = f"Tool '{tool_name}' is blocked by policy '{row['name']}'"
+
+        elif policy_type == "block_tool_over_cost":
+            threshold = config.get("max_cost", float("inf"))
+            if cost > threshold:
+                violated = True
+                reason = f"Tool '{tool_name}' costs ₹{cost:.2f} which exceeds ₹{threshold:.2f} threshold (policy '{row['name']}')"
+
+        elif policy_type == "block_category":
+            category = config.get("category", "")
+            # Categories not yet implemented on tools — future feature
+            pass
+
+        elif policy_type == "budget_warning":
+            threshold_pct = config.get("threshold_pct", 80)
+            if daily_budget > 0:
+                pct = (spent_today / daily_budget) * 100
+                if action == "block" and pct >= threshold_pct:
+                    violated = True
+                    reason = f"Budget usage ({pct:.0f}%) exceeds {threshold_pct}% threshold (policy '{row['name']}')"
+                elif action == "warn" and pct >= threshold_pct:
+                    violated = True
+                    reason = f"Budget warning: {pct:.0f}% used (policy '{row['name']}')"
+
+        elif policy_type == "require_approval":
+            target_tool = config.get("tool_name", "")
+            if tool_name == target_tool or (config.get("min_cost") and cost >= config["min_cost"]):
+                violated = True
+                reason = f"Tool '{tool_name}' requires approval (policy '{row['name']}')"
+
+        if violated:
+            results.append({
+                "policy_id": policy_id,
+                "name": row["name"],
+                "action": action,
+                "reason": reason,
+            })
+            # Increment violation counter
+            await db.execute(
+                "UPDATE policies SET violation_count = violation_count + 1 WHERE id = ?",
+                (policy_id,)
+            )
+
+    if results:
+        await db.commit()
+
+    return results
