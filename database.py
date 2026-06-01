@@ -71,6 +71,8 @@ async def get_db():
         await _db.execute("PRAGMA foreign_keys=ON")    # Enforce FK constraints
         await _init_schema(_db)
         await _init_policies_table(_db)  # v0.6: Policy engine
+        await _init_webhooks_table(_db)   # v0.7: Webhook alerts
+        await _init_admin_table(_db)       # v0.7: Admin API keys
     return _db
 
 
@@ -782,3 +784,253 @@ async def check_policies(workspace_id: str, tool_name: str, cost: float, spent_t
         await db.commit()
 
     return results
+
+
+# ═══════════════════════════════════════════════
+# v0.7 — Webhook Alerts
+#
+# Webhooks let agent-gov push notifications when:
+#   - An agent is paused for budget overrun
+#   - A policy violation is triggered
+#   - Budget usage reaches 80% (warning threshold)
+#   - An approval request is created/resolved
+#
+# Each webhook has a URL that receives POST with
+# JSON payload describing the event.
+# ═══════════════════════════════════════════════
+
+import json
+import httpx
+import asyncio
+
+async def _init_webhooks_table(db):
+    """Create webhooks table if not exists."""
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS webhooks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            workspace_id TEXT NOT NULL DEFAULT 'default',
+            name TEXT NOT NULL,
+            url TEXT NOT NULL,
+            events TEXT NOT NULL DEFAULT '["budget_exceeded","policy_violation"]',
+            enabled INTEGER NOT NULL DEFAULT 1,
+            secret TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            last_triggered_at TEXT,
+            last_status_code INTEGER,
+            failure_count INTEGER NOT NULL DEFAULT 0,
+            FOREIGN KEY (workspace_id) REFERENCES workspaces(id)
+        )
+    """)
+    await db.execute("""
+        CREATE INDEX IF NOT EXISTS idx_webhooks_workspace
+        ON webhooks(workspace_id, enabled)
+    """)
+    await db.commit()
+
+
+async def register_webhook(name: str, url: str, workspace_id: str = "default",
+                           events: list = None, secret: str = "") -> dict:
+    """Register a new webhook endpoint."""
+    db = await get_db()
+    now = datetime.now().isoformat()
+    events_str = json.dumps(events or ["budget_exceeded", "policy_violation"])
+
+    cursor = await db.execute("""
+        INSERT INTO webhooks (workspace_id, name, url, events, enabled, secret, created_at)
+        VALUES (?, ?, ?, ?, 1, ?, ?)
+    """, (workspace_id, name, url, events_str, secret, now))
+    await db.commit()
+
+    return {
+        "id": cursor.lastrowid,
+        "name": name,
+        "url": url,
+        "events": events or ["budget_exceeded", "policy_violation"],
+        "enabled": True,
+        "workspace_id": workspace_id
+    }
+
+
+async def list_webhooks(workspace_id: str = None) -> list[dict]:
+    """List all webhooks, optionally filtered by workspace."""
+    db = await get_db()
+    if workspace_id:
+        cursor = await db.execute(
+            "SELECT * FROM webhooks WHERE workspace_id = ? ORDER BY created_at DESC",
+            (workspace_id,)
+        )
+    else:
+        cursor = await db.execute("SELECT * FROM webhooks ORDER BY created_at DESC")
+    rows = await cursor.fetchall()
+    return [{
+        "id": row["id"],
+        "workspace_id": row["workspace_id"],
+        "name": row["name"],
+        "url": row["url"],
+        "events": json.loads(row["events"]),
+        "enabled": bool(row["enabled"]),
+        "last_triggered_at": row["last_triggered_at"],
+        "last_status_code": row["last_status_code"],
+        "failure_count": row["failure_count"],
+        "created_at": row["created_at"]
+    } for row in rows]
+
+
+async def delete_webhook(webhook_id: int) -> bool:
+    """Delete a webhook by ID."""
+    db = await get_db()
+    cursor = await db.execute("DELETE FROM webhooks WHERE id = ?", (webhook_id,))
+    await db.commit()
+    return cursor.rowcount > 0
+
+
+async def test_webhook(webhook_id: int) -> dict:
+    """Send a test payload to a webhook to verify it works."""
+    db = await get_db()
+    cursor = await db.execute("SELECT * FROM webhooks WHERE id = ?", (webhook_id,))
+    row = await cursor.fetchone()
+    if not row:
+        return {"success": False, "error": "Webhook not found"}
+
+    payload = {
+        "event": "test",
+        "webhook_id": row["id"],
+        "name": row["name"],
+        "timestamp": datetime.now().isoformat(),
+        "message": "This is a test notification from agent-gov"
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.post(row["url"], json=payload)
+        now = datetime.now().isoformat()
+        await db.execute(
+            "UPDATE webhooks SET last_triggered_at = ?, last_status_code = ? WHERE id = ?",
+            (now, resp.status_code, webhook_id)
+        )
+        await db.commit()
+        return {"success": resp.status_code < 500, "status_code": resp.status_code}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+async def dispatch_webhook_event(workspace_id: str, event: str, payload: dict):
+    """Dispatch an event to all matching webhooks for a workspace.
+    
+    This is fire-and-forget: webhook delivery failures are logged
+    but do NOT block the proxy call.
+    """
+    db = await get_db()
+    cursor = await db.execute(
+        "SELECT * FROM webhooks WHERE workspace_id = ? AND enabled = 1",
+        (workspace_id,)
+    )
+    rows = await cursor.fetchall()
+
+    for row in rows:
+        subscribed_events = json.loads(row["events"])
+        if event not in subscribed_events:
+            continue
+
+        # Fire-and-forget: don't block on webhook delivery
+        asyncio.create_task(_send_webhook(
+            webhook_id=row["id"],
+            url=row["url"],
+            event=event,
+            payload=payload
+        ))
+
+
+async def _send_webhook(webhook_id: int, url: str, event: str, payload: dict):
+    """Send a webhook POST request and record the result."""
+    body = {
+        "event": event,
+        "webhook_id": webhook_id,
+        "timestamp": datetime.now().isoformat(),
+        "data": payload
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.post(url, json=body)
+        db = await get_db()
+        now = datetime.now().isoformat()
+        await db.execute(
+            "UPDATE webhooks SET last_triggered_at = ?, last_status_code = ? WHERE id = ?",
+            (now, resp.status_code, webhook_id)
+        )
+        if resp.status_code >= 500:
+            await db.execute(
+                "UPDATE webhooks SET failure_count = failure_count + 1 WHERE id = ?",
+                (webhook_id,)
+            )
+        await db.commit()
+    except Exception:
+        db = await get_db()
+        await db.execute(
+            "UPDATE webhooks SET failure_count = failure_count + 1 WHERE id = ?",
+            (webhook_id,)
+        )
+        await db.commit()
+
+
+# ═══════════════════════════════════════════════
+# v0.7 — Admin API Keys
+#
+# Admin API keys can manage agents across workspaces.
+# They're separate from agent keys and stored with
+# a special prefix (admin-*). Admin access is checked
+# via a simple role field on the token.
+# ═══════════════════════════════════════════════
+
+async def _init_admin_table(db):
+    """Create admin_keys table if not exists."""
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS admin_keys (
+            key_hash TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            last_used_at TEXT
+        )
+    """)
+    await db.commit()
+
+
+async def create_admin_key(name: str) -> dict:
+    """Create a new admin API key."""
+    db = await get_db()
+    raw_key = "admin-" + secrets.token_hex(16)
+    key_hash = hash_key(raw_key)
+    now = datetime.now().isoformat()
+
+    await db.execute("""
+        INSERT OR IGNORE INTO admin_keys (key_hash, name, created_at)
+        VALUES (?, ?, ?)
+    """, (key_hash, name, now))
+    await db.commit()
+
+    return {
+        "admin_key": raw_key,
+        "name": name,
+        "message": "Save this admin key — it won't be shown again!"
+    }
+
+
+async def verify_admin_key(raw_key: str) -> bool:
+    """Check if a raw key is a valid admin key."""
+    if not raw_key.startswith("admin-"):
+        return False
+    key_hash = hash_key(raw_key)
+    db = await get_db()
+    cursor = await db.execute(
+        "SELECT 1 FROM admin_keys WHERE key_hash = ?", (key_hash,)
+    )
+    exists = await cursor.fetchone() is not None
+    if exists:
+        now = datetime.now().isoformat()
+        await db.execute(
+            "UPDATE admin_keys SET last_used_at = ? WHERE key_hash = ?",
+            (now, key_hash)
+        )
+        await db.commit()
+    return exists

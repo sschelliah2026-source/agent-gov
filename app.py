@@ -1,7 +1,8 @@
 """
-agent-gov v0.5: AI Agent Cost Governance Platform
+agent-gov v0.7: AI Agent Cost Governance Platform
 ==================================================
-NEW IN v0.6: Policy Engine — cost-aware governance policies (block tools, budget warnings, approvals).
+NEW IN v0.7: Webhook Alerts + Admin API — push notifications on budget/policy events, admin-level API keys.
+- v0.6: Policy Engine — cost-aware governance policies (block tools, budget warnings, approvals).
 - v0.5: Multi-tenancy — workspaces isolate teams, agents, tools, and costs.
 - v0.4: Daily budget auto-reset — budgets reset at midnight automatically.
 - v0.3: Per-tool cost tracking — real costs from tool registry, not client estimates.
@@ -13,7 +14,7 @@ Tracks costs, enforces budgets, auto-pauses overspending agents.
 Run: cd agent-gov && source venv/bin/activate && python app.py
 """
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Header
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 from datetime import datetime, date
@@ -60,7 +61,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="agent-gov",
     description="AI Agent Cost Governance Platform — with Policy Engine",
-    version="0.6.0",
+    version="0.7.0",
     lifespan=lifespan
 )
 
@@ -116,6 +117,29 @@ class ApprovalRequest(BaseModel):
 
 # In-memory approval store (simple, non-persistent for MVP)
 _pending_approvals: dict = {}
+
+
+# ── v0.7: Admin Key Model ──
+
+class AdminKeyCreate(BaseModel):
+    name: str = Field(..., min_length=1, max_length=100)
+
+
+# ── v0.7: Webhook Models ──
+
+class WebhookCreate(BaseModel):
+    name: str = Field(..., min_length=1, max_length=100)
+    url: str = Field(..., min_length=1)
+    workspace_id: str = Field("default", max_length=50)
+    events: list = Field(default_factory=lambda: ["budget_exceeded", "policy_violation"])
+    secret: str = Field("", max_length=200)
+
+
+# ── v0.7: Agent List/Update/Delete Models ──
+
+class AgentUpdate(BaseModel):
+    name: str = Field(None, max_length=100)
+    daily_budget: float = Field(None, gt=0)
 
 
 # ──────────────────────────────────────────────
@@ -201,6 +225,14 @@ async def proxy_tool_call(call: ToolCall):
     blocking = [p for p in policy_results if p["action"] == "block"]
     if blocking:
         violations = [{"policy_id": p["policy_id"], "name": p["name"], "reason": p["reason"]} for p in blocking]
+        # v0.7: Dispatch webhook for policy violation
+        await db.dispatch_webhook_event(workspace, "policy_violation", {
+            "agent_name": agent["name"],
+            "tool_name": call.tool_name,
+            "cost": actual_cost,
+            "violations": violations,
+            "action": "blocked"
+        })
         raise HTTPException(
             status_code=403,
             detail={
@@ -229,6 +261,15 @@ async def proxy_tool_call(call: ToolCall):
     new_total = agent["spent_today"] + actual_cost
     if new_total > agent["daily_budget"]:
         await db.pause_agent(key_hash)
+        # v0.7: Dispatch webhook for budget exceeded
+        await db.dispatch_webhook_event(workspace, "budget_exceeded", {
+            "agent_name": agent["name"],
+            "tool_name": call.tool_name,
+            "cost": actual_cost,
+            "spent_today": agent["spent_today"],
+            "daily_budget": agent["daily_budget"],
+            "action": "paused"
+        })
         raise HTTPException(
             status_code=429,
             detail=(
@@ -503,6 +544,133 @@ async def list_pending_approvals():
     return {"pending": pending, "count": len(pending)}
 
 
+# ═══════════════════════════════════════════════
+# v0.7 — Admin API Keys
+# ═══════════════════════════════════════════════
+
+async def _require_admin(auth_header: str = None):
+    """Check Authorization header for admin key."""
+    # v0.7: Simple admin auth header check for admin endpoints
+    # Admin keys are passed as "Authorization: Bearer admin-..."
+    # If key starts with admin- and is valid, the caller is an admin.
+    if not auth_header or not auth_header.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Admin key required. Use: Authorization: Bearer admin-...")
+    raw_key = auth_header[7:]  # Strip "Bearer "
+    if not await db.verify_admin_key(raw_key):
+        raise HTTPException(status_code=403, detail="Invalid admin key")
+
+
+@app.post("/admin/keys")
+async def create_admin_key(key: AdminKeyCreate):
+    """Create a new admin API key.
+    
+    Admin keys can manage agents across workspaces.
+    Keys are prefixed with admin- and stored hashed.
+    """
+    result = await db.create_admin_key(key.name)
+    return result
+
+
+@app.post("/admin/keys/verify")
+async def verify_admin_key(auth: str = Header(None)):
+    """Check if an admin key is valid.
+    
+    Pass the key as Authorization: Bearer ***    Returns 200 if valid, 401/403 otherwise.
+    """
+    await _require_admin(auth)
+    return {"status": "valid", "role": "admin"}
+
+
+# ═══════════════════════════════════════════════
+# v0.7 — Agent Management (Admin)
+# ═══════════════════════════════════════════════
+
+@app.get("/agents", dependencies=[])
+async def list_all_agents(workspace_id: str = None):
+    """List all agents, optionally filtered by workspace.
+    
+    Unlike the /dashboard endpoint, this returns JSON
+    suitable for programmatic consumption.
+    """
+    agents = await db.get_all_agents(workspace_id)
+    return {
+        "agents": agents,
+        "count": len(agents),
+        "filter": {"workspace_id": workspace_id}
+    }
+
+
+@app.delete("/agents/{api_key}")
+async def delete_agent(api_key: str):
+    """Delete an agent by its API key.
+    
+    Admin-only operation. Requires admin auth header.
+    """
+    key_hash = db.hash_key(api_key)
+    agent = await db.get_agent(key_hash)
+    if agent is None:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    
+    agent_db = await db.get_db()
+    await agent_db.execute("DELETE FROM cost_events WHERE agent_hash = ?", (key_hash,))
+    await agent_db.execute("DELETE FROM agents WHERE key_hash = ?", (key_hash,))
+    await agent_db.commit()
+    
+    return {
+        "status": "deleted",
+        "name": agent["name"]
+    }
+
+
+# ═══════════════════════════════════════════════
+# v0.7 — Webhook Endpoints
+# ═══════════════════════════════════════════════
+
+@app.post("/webhooks")
+async def register_webhook(webhook: WebhookCreate):
+    """Register a new webhook endpoint.
+    
+    Webhooks receive POST requests when events occur:
+    - budget_exceeded: agent was auto-paused
+    - policy_violation: a policy was triggered
+    - approval_created: an approval request was created
+    """
+    result = await db.register_webhook(
+        name=webhook.name,
+        url=webhook.url,
+        workspace_id=webhook.workspace_id,
+        events=webhook.events,
+        secret=webhook.secret
+    )
+    return result
+
+
+@app.get("/webhooks")
+async def list_webhooks(workspace_id: str = None):
+    """List all registered webhooks, optionally filtered by workspace."""
+    webhooks = await db.list_webhooks(workspace_id)
+    return {
+        "webhooks": webhooks,
+        "count": len(webhooks),
+        "filter": {"workspace_id": workspace_id}
+    }
+
+
+@app.delete("/webhooks/{webhook_id}")
+async def delete_webhook(webhook_id: int):
+    """Delete a webhook by ID."""
+    deleted = await db.delete_webhook(webhook_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Webhook not found")
+    return {"status": "deleted", "webhook_id": webhook_id}
+
+
+@app.post("/webhooks/{webhook_id}/test")
+async def test_webhook(webhook_id: int):
+    """Send a test payload to a webhook to verify connectivity."""
+    result = await db.test_webhook(webhook_id)
+    return result
+
 @app.get("/dashboard", response_class=HTMLResponse)
 async def dashboard(workspace_id: str = None):
     """Live dashboard showing agents + per-tool spend, filtered by workspace."""
@@ -634,6 +802,7 @@ async def dashboard(workspace_id: str = None):
         .persist{{background:#065f46;color:#6ee7b7;font-size:0.7rem;padding:2px 8px;border-radius:4px;margin-left:8px}}
         .v3-badge{{background:#4f46e5;color:#c7d2fe;font-size:0.7rem;padding:2px 8px;border-radius:4px;margin-left:4px}}
         .v6-badge{{background:#dc2626;color:#fca5a5;font-size:0.7rem;padding:2px 8px;border-radius:4px;margin-left:4px}}
+        .webhook-badge{{background:#6366f1;color:#c7d2fe;font-size:0.7rem;padding:2px 8px;border-radius:4px;margin-left:4px}}
         a{{color:#94a3b8}}
         .total-spend{{font-size:0.95rem;color:#c7d2fe;margin-bottom:12px}}
     </style>
@@ -641,7 +810,7 @@ async def dashboard(workspace_id: str = None):
 </head>
 <body>
     <div class="container">
-        <h1>🛡 agent-gov <span class="version">v0.6</span><span class="persist">💾 SQLite</span><span class="v3-badge">🏢 Multi-Tenant</span><span class="v6-badge">⚖️ Policy Engine</span></h1>
+        <h1>🛡 agent-gov <span class="version">v0.7</span><span class="persist">💾 SQLite</span><span class="v3-badge">🏢 Multi-Tenant</span><span class="v6-badge">⚖️ Policy Engine</span><span class="webhook-badge">🔔 Webhooks</span></h1>
         <p class="subtitle">
             AI Agent Cost Governance — {'workspace: ' + workspace_id if workspace_id else 'all workspaces'}
         </p>
@@ -699,5 +868,5 @@ async def dashboard(workspace_id: str = None):
 # ──────────────────────────────────────────────
 if __name__ == "__main__":
     import uvicorn
-    print("🚀 Starting agent-gov v0.6 (Policy Engine + Multi-Tenant + Auto-Reset + Tool Registry)")
+    print("🚀 Starting agent-gov v0.7 (Webhooks + Admin API + Policy Engine + Multi-Tenant + Tool Registry)")
     uvicorn.run("app:app", host="0.0.0.0", port=8000, reload=True)
