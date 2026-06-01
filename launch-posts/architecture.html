@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>agent-gov Architecture</title>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&display=swap" rel="stylesheet">
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #020617; font-family: 'JetBrains Mono', monospace; color: #e2e8f0; min-height: 100vh; display: flex; justify-content: center; padding: 40px 20px; }
+.container { max-width: 1200px; width: 100%; }
+.header { margin-bottom: 32px; }
+.header h1 { font-size: 24px; font-weight: 700; color: #f8fafc; display: flex; align-items: center; gap: 12px; }
+.header .dot { width: 10px; height: 10px; border-radius: 50%; background: #22d3ee; animation: pulse 2s infinite; display: inline-block; }
+.header .subtitle { font-size: 12px; color: #64748b; margin-top: 6px; }
+@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+.diagram-card { background: #0f172a; border: 1px solid #1e293b; border-radius: 12px; padding: 40px; margin-bottom: 32px; }
+svg { width: 100%; height: auto; display: block; }
+.cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+.card { background: #0f172a; border: 1px solid #1e293b; border-radius: 8px; padding: 20px; }
+.card-header { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
+.card-dot { width: 8px; height: 8px; border-radius: 50%; }
+.card-dot.cyan { background: #22d3ee; }
+.card-dot.emerald { background: #34d399; }
+.card-dot.violet { background: #a78bfa; }
+.card h3 { font-size: 13px; font-weight: 600; color: #f8fafc; }
+.card ul { list-style: none; }
+.card li { font-size: 11px; color: #94a3b8; padding: 3px 0; }
+.card li::before { content: "• "; color: #475569; }
+.footer { text-align: center; font-size: 10px; color: #475569; margin-top: 24px; padding-top: 16px; border-top: 1px solid #1e293b; }
+</style>
+</head>
+<body>
+<div class="container">
+  <div class="header">
+    <h1><span class="dot"></span> agent-gov Architecture</h1>
+    <div class="subtitle">AI Agent Cost Governance — Budget Enforcement, Tool Registry, Multi-Tenant Workspaces</div>
+  </div>
+
+  <div class="diagram-card">
+    <svg viewBox="0 0 1000 620" xmlns="http://www.w3.org/2000/svg">
+      <defs>
+        <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+          <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#1e293b" stroke-width="0.5"/>
+        </pattern>
+        <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto">
+          <path d="M 0 0 L 10 5 L 0 10 z" fill="#475569"/>
+        </marker>
+        <marker id="arrow-cyan" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto">
+          <path d="M 0 0 L 10 5 L 0 10 z" fill="#22d3ee"/>
+        </marker>
+        <linearGradient id="bg-grad" x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0%" stop-color="#0f172a"/>
+          <stop offset="100%" stop-color="#020617"/>
+        </linearGradient>
+      </defs>
+
+      <rect width="1000" height="620" fill="url(#bg-grad)"/>
+      <rect width="1000" height="620" fill="url(#grid)"/>
+
+      <!-- Title -->
+      <text x="500" y="30" text-anchor="middle" fill="#94a3b8" font-size="11" font-weight="600">Agent → agent-gov → Tools — Cost Governance Flow</text>
+
+      <!-- === LAYER 1: AGENTS === -->
+      <rect x="80" y="60" width="840" height="120" rx="10" fill="none" stroke="#1e293b" stroke-width="1.5" stroke-dasharray="6,4"/>
+      <text x="100" y="82" fill="#64748b" font-size="9" font-weight="600">YOUR AGENTS</text>
+
+      <rect x="120" y="100" width="180" height="60" rx="6" fill="rgba(8, 51, 68, 0.4)" stroke="#22d3ee" stroke-width="1.5"/>
+      <text x="210" y="130" text-anchor="middle" fill="#22d3ee" font-size="12" font-weight="600">ChatBot</text>
+      <text x="210" y="145" text-anchor="middle" fill="#64748b" font-size="9">Daily Budget: ₹500</text>
+
+      <rect x="410" y="100" width="180" height="60" rx="6" fill="rgba(8, 51, 68, 0.4)" stroke="#22d3ee" stroke-width="1.5"/>
+      <text x="500" y="130" text-anchor="middle" fill="#22d3ee" font-size="12" font-weight="600">Data Analyst</text>
+      <text x="500" y="145" text-anchor="middle" fill="#64748b" font-size="9">Daily Budget: ₹200</text>
+
+      <rect x="700" y="100" width="180" height="60" rx="6" fill="rgba(8, 51, 68, 0.4)" stroke="#22d3ee" stroke-width="1.5"/>
+      <text x="790" y="130" text-anchor="middle" fill="#22d3ee" font-size="12" font-weight="600">Automation Bot</text>
+      <text x="790" y="145" text-anchor="middle" fill="#64748b" font-size="9">Daily Budget: ₹1,000</text>
+
+      <!-- Arrow: Agents → agent-gov -->
+      <line x1="210" y1="160" x2="210" y2="210" stroke="#475569" stroke-width="1.5" marker-end="url(#arrow)"/>
+      <line x1="500" y1="160" x2="500" y2="210" stroke="#475569" stroke-width="1.5" marker-end="url(#arrow)"/>
+      <line x1="790" y1="160" x2="790" y2="210" stroke="#475569" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+      <!-- === LAYER 2: agent-gov === -->
+      <rect x="60" y="215" width="880" height="200" rx="10" fill="none" stroke="#34d399" stroke-width="1.5" stroke-dasharray="4,4"/>
+      <text x="80" y="237" fill="#34d399" font-size="9" font-weight="600">agent-gov PROXY</text>
+
+      <!-- Internal components -->
+      <rect x="90" y="255" width="190" height="70" rx="6" fill="rgba(6, 78, 59, 0.4)" stroke="#34d399" stroke-width="1.5"/>
+      <text x="185" y="282" text-anchor="middle" fill="#34d399" font-size="11" font-weight="600">Auth Check</text>
+      <text x="185" y="297" text-anchor="middle" fill="#64748b" font-size="8">Validate API Key</text>
+      <text x="185" y="310" text-anchor="middle" fill="#64748b" font-size="8">Find Agent + Workspace</text>
+
+      <rect x="310" y="255" width="190" height="70" rx="6" fill="rgba(6, 78, 59, 0.4)" stroke="#34d399" stroke-width="1.5"/>
+      <text x="405" y="282" text-anchor="middle" fill="#34d399" font-size="11" font-weight="600">Budget Check</text>
+      <text x="405" y="297" text-anchor="middle" fill="#64748b" font-size="8">Look up daily spend</text>
+      <text x="405" y="310" text-anchor="middle" fill="#64748b" font-size="8">Auto-pause if exceeded</text>
+
+      <rect x="530" y="255" width="190" height="70" rx="6" fill="rgba(6, 78, 59, 0.4)" stroke="#34d399" stroke-width="1.5"/>
+      <text x="625" y="282" text-anchor="middle" fill="#34d399" font-size="11" font-weight="600">Cost Engine</text>
+      <text x="625" y="297" text-anchor="middle" fill="#64748b" font-size="8">Real tool cost lookup</text>
+      <text x="625" y="310" text-anchor="middle" fill="#64748b" font-size="8">vs. client estimate</text>
+
+      <rect x="750" y="255" width="160" height="70" rx="6" fill="rgba(6, 78, 59, 0.4)" stroke="#34d399" stroke-width="1.5"/>
+      <text x="830" y="282" text-anchor="middle" fill="#34d399" font-size="11" font-weight="600">Logger</text>
+      <text x="830" y="297" text-anchor="middle" fill="#64748b" font-size="8">Log cost event</text>
+      <text x="830" y="310" text-anchor="middle" fill="#64748b" font-size="8">Update daily total</text>
+
+      <!-- Internal flow arrows -->
+      <line x1="280" y1="290" x2="305" y2="290" stroke="#475569" stroke-width="1" marker-end="url(#arrow)"/>
+      <line x1="500" y1="290" x2="525" y2="290" stroke="#475569" stroke-width="1" marker-end="url(#arrow)"/>
+      <line x1="720" y1="290" x2="745" y2="290" stroke="#475569" stroke-width="1" marker-end="url(#arrow)"/>
+
+      <!-- Decision diamonds -->
+      <rect x="120" y="355" width="140" height="30" rx="4" fill="rgba(6, 78, 59, 0.3)" stroke="#34d399" stroke-width="1"/>
+      <text x="190" y="374" text-anchor="middle" fill="#34d399" font-size="9">✅ 200 — Approved</text>
+
+      <rect x="750" y="355" width="160" height="30" rx="4" fill="rgba(136, 19, 55, 0.4)" stroke="#fb7185" stroke-width="1"/>
+      <text x="830" y="374" text-anchor="middle" fill="#fb7185" font-size="9">🛑 429 — Budget Exceeded</text>
+
+      <!-- Middle storage -->
+      <rect x="350" y="348" width="300" height="44" rx="6" fill="rgba(76, 29, 149, 0.4)" stroke="#a78bfa" stroke-width="1.5"/>
+      <text x="500" y="370" text-anchor="middle" fill="#a78bfa" font-size="11" font-weight="600">SQLite — Agents | Tools | Cost Events | Workspaces</text>
+      <text x="500" y="383" text-anchor="middle" fill="#64748b" font-size="8">Daily Auto-Reset at Midnight</text>
+
+      <line x1="500" y1="325" x2="500" y2="345" stroke="#a78bfa" stroke-width="1" stroke-dasharray="3,3"/>
+
+      <!-- === LAYER 3: TOOLS === -->
+      <rect x="80" y="430" width="840" height="170" rx="10" fill="none" stroke="#1e293b" stroke-width="1.5" stroke-dasharray="6,4"/>
+      <text x="100" y="452" fill="#64748b" font-size="9" font-weight="600">TOOLS (Real APIs)</text>
+
+      <rect x="110" y="470" width="150" height="55" rx="6" fill="rgba(30, 41, 59, 0.5)" stroke="#94a3b8" stroke-width="1"/>
+      <text x="185" y="497" text-anchor="middle" fill="#94a3b8" font-size="11" font-weight="600">OpenAI GPT-4o</text>
+      <text x="185" y="512" text-anchor="middle" fill="#64748b" font-size="8">₹0.15/call</text>
+
+      <rect x="290" y="470" width="150" height="55" rx="6" fill="rgba(30, 41, 59, 0.5)" stroke="#94a3b8" stroke-width="1"/>
+      <text x="365" y="497" text-anchor="middle" fill="#94a3b8" font-size="11" font-weight="600">DeepSeek V3</text>
+      <text x="365" y="512" text-anchor="middle" fill="#64748b" font-size="8">₹0.01/call</text>
+
+      <rect x="470" y="470" width="150" height="55" rx="6" fill="rgba(30, 41, 59, 0.5)" stroke="#94a3b8" stroke-width="1"/>
+      <text x="545" y="497" text-anchor="middle" fill="#94a3b8" font-size="11" font-weight="600">Firecrawl</text>
+      <text x="545" y="512" text-anchor="middle" fill="#64748b" font-size="8">₹0.50/page</text>
+
+      <rect x="650" y="470" width="150" height="55" rx="6" fill="rgba(30, 41, 59, 0.5)" stroke="#94a3b8" stroke-width="1"/>
+      <text x="725" y="497" text-anchor="middle" fill="#94a3b8" font-size="11" font-weight="600">ElevenLabs</text>
+      <text x="725" y="512" text-anchor="middle" fill="#64748b" font-size="8">₹0.30/call</text>
+
+      <rect x="830" y="470" width="60" height="55" rx="6" fill="rgba(30, 41, 59, 0.5)" stroke="#94a3b8" stroke-width="1"/>
+      <text x="860" y="497" text-anchor="middle" fill="#94a3b8" font-size="9">+ 20</text>
+      <text x="860" y="512" text-anchor="middle" fill="#64748b" font-size="8">more</text>
+
+      <!-- Approval arrow from agent-gov to tools -->
+      <line x1="190" y1="390" x2="185" y2="465" stroke="#22d3ee" stroke-width="1.5" marker-end="url(#arrow-cyan)"/>
+      <text x="145" y="432" fill="#22d3ee" font-size="8">Approved → Call API</text>
+
+      <!-- Rejection arrow -->
+      <line x1="830" y1="390" x2="860" y2="465" stroke="#fb7185" stroke-width="1.5" stroke-dasharray="4,3"/>
+      <text x="800" y="432" fill="#fb7185" font-size="8" text-anchor="end">Rejected ⬅</text>
+
+      <!-- === DASHBOARD === -->
+      <rect x="380" y="553" width="240" height="35" rx="6" fill="rgba(251, 146, 60, 0.3)" stroke="#fb923c" stroke-width="1"/>
+      <text x="500" y="575" text-anchor="middle" fill="#fb923c" font-size="10" font-weight="600">📊 Dashboard — Live Agent & Tool Spend</text>
+    </svg>
+  </div>
+
+  <div class="cards">
+    <div class="card">
+      <div class="card-header">
+        <div class="card-dot cyan"></div>
+        <h3>Budget Enforcement</h3>
+      </div>
+      <ul>
+        <li>Per-agent daily budgets</li>
+        <li>Auto-pause on overage</li>
+        <li>Manual resume endpoint</li>
+        <li>Daily auto-reset at midnight</li>
+      </ul>
+    </div>
+    <div class="card">
+      <div class="card-header">
+        <div class="card-dot emerald"></div>
+        <h3>Tool Registry</h3>
+      </div>
+      <ul>
+        <li>Register tools with real costs</li>
+        <li>Proxy uses real cost, not estimate</li>
+        <li>24 pre-configured tool presets</li>
+        <li>Per-tool analytics dashboard</li>
+      </ul>
+    </div>
+    <div class="card">
+      <div class="card-header">
+        <div class="card-dot violet"></div>
+        <h3>Multi-Tenancy</h3>
+      </div>
+      <ul>
+        <li>Workspace isolation</li>
+        <li>Separate agents, tools, budgets</li>
+        <li>Dashboard filtered by workspace</li>
+        <li>Default workspace for backward compat</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="footer">
+    agent-gov v0.5 • MIT License • github.com/sschelliah2026-source/agent-gov • pip install agent-gov-saas
+  </div>
+</div>
+</body>
+</html>
